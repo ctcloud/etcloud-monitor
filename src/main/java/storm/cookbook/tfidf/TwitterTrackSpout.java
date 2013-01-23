@@ -1,44 +1,43 @@
 package storm.cookbook.tfidf;
 
-import backtype.storm.Config;
-import twitter4j.TwitterStream;
-import twitter4j.TwitterStreamFactory;
-import backtype.storm.spout.SpoutOutputCollector;
-import backtype.storm.task.TopologyContext;
-import backtype.storm.topology.OutputFieldsDeclarer;
-import backtype.storm.topology.base.BaseRichSpout;
-import backtype.storm.tuple.Fields;
-import backtype.storm.tuple.Values;
-import backtype.storm.utils.Utils;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import storm.trident.operation.TridentCollector;
+import storm.trident.spout.IBatchSpout;
 import twitter4j.FilterQuery;
 import twitter4j.StallWarning;
 import twitter4j.Status;
 import twitter4j.StatusDeletionNotice;
 import twitter4j.StatusListener;
+import twitter4j.TwitterStream;
+import twitter4j.TwitterStreamFactory;
+import twitter4j.URLEntity;
+import backtype.storm.Config;
+import backtype.storm.task.TopologyContext;
+import backtype.storm.tuple.Fields;
+import backtype.storm.tuple.Values;
+import backtype.storm.utils.Utils;
 
-public class TwitterTrackSpout extends BaseRichSpout {
+public class TwitterTrackSpout implements IBatchSpout {
 	Logger LOG = LoggerFactory.getLogger(TwitterTrackSpout.class); 
-    SpoutOutputCollector collector;
     LinkedBlockingQueue<Status> queue = null;
     TwitterStream twitterStream;
     long maxQueueDepth;
     String[] trackTerms;
+    long batchSize;
     
-    public TwitterTrackSpout(long maxQueueDepth, String[] trackTerms) {
+    public TwitterTrackSpout(long maxQueueDepth, String[] trackTerms, long batchSize) {
     	this.maxQueueDepth = maxQueueDepth;
     	this.trackTerms = trackTerms;
+    	this.batchSize = batchSize;
     }
     
-    @Override
-    public void open(Map conf, TopologyContext context, SpoutOutputCollector collector) {
+    public void open(Map conf, TopologyContext context) {
         queue = new LinkedBlockingQueue<Status>(1000);
-        this.collector = collector;
         StatusListener listener = new StatusListener() {
         	
             @Override
@@ -79,14 +78,14 @@ public class TwitterTrackSpout extends BaseRichSpout {
         filter.track(trackTerms);
         twitterStream.filter(filter);
     }
-
-    @Override
-    public void nextTuple() {
-        Status ret = queue.poll();
+    
+    public void emitBatch(long batchId, TridentCollector collector) {
+    	//TODO: do this better
+    	Status ret = queue.poll();
         if(ret==null) {
             Utils.sleep(50);
         } else {
-            collector.emit(new Values(ret));
+            collector.emit(new Values(ret.getId(), ret.getText(),ret.getURLEntities(),ret.getHashtagEntities()));
         }
     }
 
@@ -102,17 +101,21 @@ public class TwitterTrackSpout extends BaseRichSpout {
         return ret;
     }    
 
-    @Override
-    public void ack(Object id) {
+    public void fail(long batchId) {
     }
 
-    @Override
-    public void fail(Object id) {
-    }
+	@Override
+	public void ack(long batchId) {
+		//TODO: consider only removing from queue once processed, maybe use kafka instead?
+		
+	}
 
-    @Override
-    public void declareOutputFields(OutputFieldsDeclarer declarer) {
-        declarer.declare(new Fields("tweet"));
-    }
+	@Override
+	public Fields getOutputFields() {
+		return new Fields(TfidfTopologyFields.TWEET_ID,
+				TfidfTopologyFields.TWEET_TEXT,
+				TfidfTopologyFields.TWEET_URLS,
+				TfidfTopologyFields.TWEET_HAS_TAGS);
+	}
     
 }
