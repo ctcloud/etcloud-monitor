@@ -1,0 +1,12 @@
+drop keyspace trident_test;
+create keyspace trident_test
+    with strategy_options = [{replication_factor:1}]
+    and placement_strategy = 'org.apache.cassandra.locator.SimpleStrategy';
+
+use trident_test;
+create column family tfid
+    with comparator = AsciiType
+    and default_validation_class = 'UTF8Type'
+    and key_validation_class = 'UTF8Type';
+    
+

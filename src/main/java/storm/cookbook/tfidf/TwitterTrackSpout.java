@@ -1,5 +1,7 @@
 package storm.cookbook.tfidf;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 
@@ -43,6 +45,7 @@ public class TwitterTrackSpout implements IBatchSpout {
             @Override
             public void onStatus(Status status) {
             	if(queue.size() < maxQueueDepth){
+            		LOG.info("TWEET Received: " + status);
             		queue.offer(status);
             	} else {
             		LOG.error("Queue is now full, the following message is dropped: "+status);
@@ -80,13 +83,19 @@ public class TwitterTrackSpout implements IBatchSpout {
     }
     
     public void emitBatch(long batchId, TridentCollector collector) {
-    	//TODO: do this better
-    	Status ret = queue.poll();
-        if(ret==null) {
-            Utils.sleep(50);
-        } else {
-            collector.emit(new Values(ret.getId(), ret.getText(),ret.getURLEntities(),ret.getHashtagEntities()));
-        }
+    	//TODO: do this better, maybe use disruptor
+    	boolean controlFlag = true;
+    	int count = 0;
+    	while(controlFlag && (count < batchSize)){
+    		Status ret = queue.poll();
+            if(ret==null) {
+                Utils.sleep(50);
+                controlFlag = false;
+            } else {
+            	collector.emit(new Values(Long.toString(ret.getId()), ret.getText(),ret.getURLEntities(),ret.getHashtagEntities()));
+            }
+            count++;
+    	}
     }
 
     @Override
