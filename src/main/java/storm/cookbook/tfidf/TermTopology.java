@@ -3,7 +3,6 @@ package storm.cookbook.tfidf;
 import storm.trident.Stream;
 import storm.trident.TridentState;
 import storm.trident.TridentTopology;
-import storm.trident.fluent.GroupedStream;
 import storm.trident.operation.builtin.Count;
 import storm.trident.state.StateFactory;
 import trident.cassandra.CassandraState;
@@ -18,12 +17,21 @@ public class TermTopology {
 	
 	private static String[] searchTerms = new String[]{"AAPL"};
 	private static String[] mimeTypes = new String[]{"application/pdf","text/html", "text/plain"};
+	
+	private static StateFactory getStateFactory(String rowKey){
+		CassandraState.Options options = new CassandraState.Options();
+        options.keyspace = "trident_test";
+        options.columnFamily = "tfid";
+        options.rowKey = rowKey;
+        return CassandraState.nonTransactional("localhost", options);
+	}
     
-    public static StormTopology buildTopology(StateFactory stateFactory) {
+    public static StormTopology buildTopology() {
         //TODO: lookup the track terms for the spout or get them from the command line
         TwitterTrackSpout twitterSpout = new TwitterTrackSpout(10000, searchTerms, 100);
-        TridentTopology topology = new TridentTopology();    
-        GroupedStream tf =
+        TridentTopology topology = new TridentTopology(); 
+        
+        Stream termStream =
                 topology.newStream("tweetSpout", twitterSpout)
                   .parallelismHint(16)
                   .each(new Fields(TfidfTopologyFields.TWEET_ID, TfidfTopologyFields.TWEET_TEXT,TfidfTopologyFields.TWEET_URLS), 
@@ -32,51 +40,28 @@ public class TermTopology {
                   .each(new Fields(TfidfTopologyFields.DOCUMENT), new DocumentTokenizer(), 
                 		  new Fields(TfidfTopologyFields.DIRTY_TERM))
                   .each(new Fields(TfidfTopologyFields.DIRTY_TERM), new TermFilter(), 
-                		  new Fields(TfidfTopologyFields.TERM))
-				  .groupBy(new Fields(TfidfTopologyFields.DOCUMENT_ID,TfidfTopologyFields.TERM));
-        		  //add the aggregate here
+                		  new Fields(TfidfTopologyFields.TERM));
         
-        GroupedStream df =
-                topology.newStream("tweetSpout", twitterSpout)
-                  .parallelismHint(16)
-                  .each(new Fields(TfidfTopologyFields.TWEET_ID, TfidfTopologyFields.TWEET_TEXT,TfidfTopologyFields.TWEET_URLS), 
-                		  new DocumentFetchFunction(mimeTypes), new Fields(TfidfTopologyFields.DOCUMENT,
-                				  TfidfTopologyFields.DOCUMENT_ID))
-                  .each(new Fields(TfidfTopologyFields.DOCUMENT), new DocumentTokenizer(), 
-                		  new Fields(TfidfTopologyFields.DIRTY_TERM))
-                  .each(new Fields(TfidfTopologyFields.DIRTY_TERM), new TermFilter(), 
-                		  new Fields(TfidfTopologyFields.TERM))
-				  .groupBy(new Fields(TfidfTopologyFields.DOCUMENT_ID,TfidfTopologyFields.TERM));
-				  //add the aggregate here
+        TridentState tf = termStream.groupBy(new Fields(TfidfTopologyFields.DOCUMENT_ID,TfidfTopologyFields.TERM))
+				  .persistentAggregate(getStateFactory("tf"), new Count(), new Fields("tf"));
         
-        GroupedStream d =
-                topology.newStream("tweetSpout", twitterSpout)
-                  .parallelismHint(16)
-                  .each(new Fields(TfidfTopologyFields.TWEET_ID, TfidfTopologyFields.TWEET_TEXT,TfidfTopologyFields.TWEET_URLS), 
-                		  new DocumentFetchFunction(mimeTypes), new Fields(TfidfTopologyFields.DOCUMENT,
-                				  TfidfTopologyFields.DOCUMENT_ID))
-                  .each(new Fields(TfidfTopologyFields.DOCUMENT), new DocumentTokenizer(), 
-                		  new Fields(TfidfTopologyFields.DIRTY_TERM))
-                  .each(new Fields(TfidfTopologyFields.DIRTY_TERM), new TermFilter(), 
-                		  new Fields(TfidfTopologyFields.TERM))
-				  .groupBy(new Fields(TfidfTopologyFields.DOCUMENT_ID,TfidfTopologyFields.TERM));
-        			//add aggregate here
+        TridentState d = termStream.groupBy(new Fields(TfidfTopologyFields.DOCUMENT_ID))
+				  .persistentAggregate(getStateFactory("d"), new Count(), new Fields("d"));
         
-        Stream idf = topology.merge(new Fields(), df.toStream(), d.toStream());
+        TridentState df = termStream.groupBy(new Fields(TfidfTopologyFields.TERM))
+				  .persistentAggregate(getStateFactory("df"), new Count(), new Fields("df"));
         
-        TridentState tfidf = topology.merge(new Fields(), tf.toStream(),idf)
-                  .persistentAggregate(stateFactory,
-                                     new Count(), new Fields("termFrequency"));
-                  /*.aggregate(new Fields("stems","document"), new DFAggregate, new Fields("df"))
-                  .aggregate(new Fields("document"), new DAggregate, new Fields("d"))
-                  .aggregate(new Fields("d","df"), new IDFAggregate,new Fields("idf"))
-                  .persistentAggregate(new MemoryMapState.Factory(), new Fields("td","idf"), 
-                  						new TFIDFAggregate, new Fields("tfidf"))         
-                  .parallelismHint(16);*/
+        //now do a join of d and df to give us idf
+        Stream idf = topology.join(df.newValuesStream(), new Fields(TfidfTopologyFields.TERM,"df"), 
+        							d.newValuesStream(), new Fields("d"), 
+        							new Fields(TfidfTopologyFields.TERM,"df","d"));
         
-        /*topology.newDRPCStream("tf", drpc)
-                .stateQuery(termCounts, new Fields(), 
-                		new MapGet(), new Fields(TfidfTopologyFields.DOCUMENT_ID, TfidfTopologyFields.TERM));*/
+        //now join tf and idf
+        TridentState tfidf = topology.join(tf.newValuesStream(), new Fields(TfidfTopologyFields.TERM,"tf"), 
+        									idf, new Fields(TfidfTopologyFields.TERM,"df","d"), 
+        									new Fields(TfidfTopologyFields.TERM,"tf","df","d"))
+        						.each(new Fields(TfidfTopologyFields.TERM,"tf","df","d"), new TfidfExpression(), new Fields(TfidfTopologyFields.TERM,"tfidf"))
+        						.partitionPersist(getStateFactory("tfidf"), new ResultUpdater());
         return topology.build();
     }
     
@@ -84,20 +69,15 @@ public class TermTopology {
         Config conf = new Config();
         conf.setMaxSpoutPending(20);
         
-        if(args.length==0) {
+        if(args.length == 0) {
             LocalDRPC drpc = new LocalDRPC();
             LocalCluster cluster = new LocalCluster();
-            CassandraState.Options options = new CassandraState.Options();
-            options.keyspace = "trident_test";
-            options.columnFamily = "tfid";
-            options.rowKey = "tf";
-            StateFactory cassandraStateFactory = CassandraState.nonTransactional("localhost", options);
-            cluster.submitTopology("tfidf", conf, buildTopology(cassandraStateFactory));
+            cluster.submitTopology("tfidf", conf, buildTopology());
             Thread.sleep(60000);
         } else {
         	//TODO: initial the state appropriately here
             conf.setNumWorkers(3);
-            StormSubmitter.submitTopology(args[0], conf, buildTopology(null));        
+            StormSubmitter.submitTopology(args[0], conf, buildTopology());        
         }
     }
 
