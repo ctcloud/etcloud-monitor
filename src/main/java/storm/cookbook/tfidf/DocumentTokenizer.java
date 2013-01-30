@@ -51,6 +51,7 @@ public class DocumentTokenizer extends BaseFunction {
 	    	CharTermAttribute termAtt = ts.getAttribute(CharTermAttribute.class);
 	        while(ts.incrementToken()) {
 	        	String lemma = MorphaStemmer.stemToken(termAtt.toString());
+	        	lemma = lemma.trim().replaceAll("\n", "").replaceAll("\r", "");
 	        	collector.emit(new Values(lemma));
 	        }
 			ts.close();

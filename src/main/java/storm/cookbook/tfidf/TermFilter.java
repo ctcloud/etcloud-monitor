@@ -39,7 +39,7 @@ public class TermFilter extends BaseFunction {
 			spellchecker = new SpellChecker(directory);
 			StandardAnalyzer analyzer = new StandardAnalyzer(Version.LUCENE_36);
 			IndexWriterConfig config = new IndexWriterConfig(Version.LUCENE_36, analyzer);
-			URL dictionaryFile = TestStemmer.class.getResource("/dictionaries/fulldictionary00.txt");
+			URL dictionaryFile = TermFilter.class.getResource("/dictionaries/fulldictionary00.txt");
 			spellchecker.indexDictionary(new PlainTextDictionary(new File(dictionaryFile.toURI())), config, true);
 		} catch (Exception e) {
 			LOG.error(e.toString());
